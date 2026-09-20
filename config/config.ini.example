@@ -1,0 +1,53 @@
+# ═══════════════════════════════════════════════════════════════
+# opalshell — Configuration
+# Copy to ~/.config/opalshell/config.ini to customize.
+# ═══════════════════════════════════════════════════════════════
+
+[general]
+# Bar height in pixels
+# bar_height = 37
+
+# Bar position: top, bottom
+# position = top
+
+# Font family for labels
+# font = JetBrainsMono Nerd Font
+
+# Font family for secondary text
+# font_alt = Rubik
+
+[theme]
+# Color scheme: mocha, macchiato, frappe, latte (Catppuccin variants)
+# colorscheme = mocha
+
+# Bar background opacity (0.0 - 1.0)
+# opacity = 0.98
+
+# Border radius
+# radius = 8
+
+[modules]
+# Enable or disable modules (true/false)
+# launcher = true
+# cpu = true
+# memory = true
+# disk = true
+# temperature = true
+# workspaces = true
+# date = true
+# clock = true
+# nightlight = true
+# brightness = true
+# network = true
+# bluetooth = true
+# audio = true
+# battery = true
+# power = true
+
+[launcher]
+# Command to run when launcher is clicked
+# command = rofi -show drun -show-icons
+
+[power]
+# Command to run when power button is clicked
+# command = wlogout

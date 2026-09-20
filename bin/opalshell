@@ -1,0 +1,353 @@
+#!/bin/sh
+# ═══════════════════════════════════════════════════════════════════════════════
+# opalshell — A beautiful Wayland status bar for Hyprland & MangoWM
+# Built with QuickShell.  https://github.com/OpalAayan/opalshell
+# ═══════════════════════════════════════════════════════════════════════════════
+
+VERSION="1.0.0"
+APP_NAME="opalshell"
+VERBOSE=""
+
+# ─── Colors (Real ANSI escapes, not literal strings) ─────────────────────────
+if [ -t 1 ] && [ -z "$NO_COLOR" ]; then
+    ESC="$(printf '\033')"
+    R="${ESC}[1;31m"
+    G="${ESC}[1;32m"
+    Y="${ESC}[1;33m"
+    B="${ESC}[1;34m"
+    C="${ESC}[1;36m"
+    W="${ESC}[1;37m"
+    D="${ESC}[0;2m"
+    N="${ESC}[0m"
+else
+    R='' G='' Y='' B='' C='' W='' D='' N=''
+fi
+
+# ─── Locate shell directory ──────────────────────────────────────────────────
+find_shell_dir() {
+    # 1. Environment override
+    if [ -n "$OPALSHELL_DIR" ] && [ -f "$OPALSHELL_DIR/shell.qml" ]; then
+        printf '%s' "$OPALSHELL_DIR"
+        return
+    fi
+
+    # 2. Relative to this script (development / git checkout)
+    _script_dir="$(cd "$(dirname "$0")" 2>/dev/null && pwd)"
+    if [ -f "$_script_dir/../shell/shell.qml" ]; then
+        printf '%s' "$_script_dir/../shell"
+        return
+    fi
+
+    # 3. System install paths (in priority order)
+    for _dir in \
+        "/usr/local/share/opalshell/shell" \
+        "/usr/share/opalshell/shell" \
+        "$HOME/.local/share/opalshell/shell"; do
+        if [ -f "$_dir/shell.qml" ]; then
+            printf '%s' "$_dir"
+            return
+        fi
+    done
+
+    # Not found
+    printf ''
+}
+
+# ─── Find running opalshell PIDs ─────────────────────────────────────────────
+find_pids() {
+    pgrep -f 'quickshell.*opalshell' 2>/dev/null
+}
+
+# ─── Usage / Help ────────────────────────────────────────────────────────────
+show_help() {
+    cat <<EOF
+
+  ${W}opalshell${N} ${D}v${VERSION}${N}
+  A beautiful Wayland status bar for Hyprland & MangoWM, built with QuickShell.
+
+  ${C}USAGE${N}
+    opalshell [OPTIONS]
+
+  ${C}OPTIONS${N}
+    ${W}-h, --help${N}          Show this help message
+    ${W}-v, --version${N}       Print version
+    ${W}-d, --daemon${N}        Run in background (daemonized)
+    ${W}-k, --kill${N}          Kill running opalshell instance(s)
+    ${W}-r, --restart${N}       Restart the bar
+    ${W}-s, --status${N}        Check if opalshell is running
+    ${W}-l, --log${N}           Follow live QuickShell logs
+    ${W}-c, --config${N}        Print config file path
+    ${W}-V, --verbose${N}       Verbose logging (use -VV for debug)
+    ${W}    --check-deps${N}    Verify required dependencies are installed
+
+  ${C}ENVIRONMENT${N}
+    ${W}OPALSHELL_DIR${N}       Override shell directory path
+
+  ${C}EXAMPLES${N}
+    opalshell              ${D}# Run in foreground (Ctrl+C to stop)${N}
+    opalshell -d           ${D}# Start in background (daemonized)${N}
+    opalshell -r           ${D}# Restart the bar${N}
+    opalshell -k           ${D}# Stop running bar${N}
+    opalshell --check-deps ${D}# Verify system dependencies${N}
+
+EOF
+}
+
+# ─── Version ──────────────────────────────────────────────────────────────────
+show_version() {
+    printf '%s %s\n' "$APP_NAME" "$VERSION"
+}
+
+# ─── Config path ──────────────────────────────────────────────────────────────
+show_config() {
+    _config="$HOME/.config/opalshell/config.ini"
+    if [ -f "$_config" ]; then
+        printf '%s\n' "$_config"
+    else
+        printf '%s %s(not yet created)%s\n' "$_config" "$D" "$N"
+        printf '  Copy the example: %scp /usr/local/share/opalshell/config.ini.example ~/.config/opalshell/config.ini%s\n' "$D" "$N"
+    fi
+}
+
+# ─── Status ───────────────────────────────────────────────────────────────────
+show_status() {
+    _pids=$(find_pids)
+    if [ -n "$_pids" ]; then
+        _pid_list=$(echo "$_pids" | tr '\n' ' ' | sed 's/ $//')
+        printf '  %s●%s  opalshell is %srunning%s  (PID %s)\n' "$G" "$N" "$G" "$N" "$_pid_list"
+    else
+        printf '  %s●%s  opalshell is %snot running%s\n' "$R" "$N" "$R" "$N"
+    fi
+}
+
+# ─── Kill ─────────────────────────────────────────────────────────────────────
+do_kill() {
+    _pids=$(find_pids)
+    if [ -z "$_pids" ]; then
+        printf '  %s!%s  opalshell is not running.\n' "$Y" "$N"
+        return 0
+    fi
+
+    _pid_list=$(echo "$_pids" | tr '\n' ' ' | sed 's/ $//')
+    printf '  %s⟶%s  Stopping opalshell (PID %s)...\n' "$Y" "$N" "$_pid_list"
+    pkill -f 'quickshell.*opalshell' 2>/dev/null
+
+    # Wait up to 3 seconds for graceful exit
+    _i=0
+    while [ "$_i" -lt 30 ]; do
+        if ! pgrep -f 'quickshell.*opalshell' >/dev/null 2>&1; then
+            printf '  %s✓%s  Stopped.\n' "$G" "$N"
+            return 0
+        fi
+        sleep 0.1
+        _i=$((_i + 1))
+    done
+
+    # Force kill if still alive
+    pkill -9 -f 'quickshell.*opalshell' 2>/dev/null
+    printf '  %s✓%s  Force-stopped.\n' "$Y" "$N"
+}
+
+# ─── Start ────────────────────────────────────────────────────────────────────
+do_start() {
+    _daemon="${1:-false}"
+
+    # Check for quickshell
+    if ! command -v quickshell >/dev/null 2>&1; then
+        printf '  %s✗%s  quickshell not found in PATH.\n' "$R" "$N" >&2
+        printf '    Install QuickShell: %shttps://quickshell.outfoxxed.me/%s\n' "$D" "$N" >&2
+        exit 1
+    fi
+
+    # Find shell directory
+    _shell_dir="$(find_shell_dir)"
+    if [ -z "$_shell_dir" ] || [ ! -f "$_shell_dir/shell.qml" ]; then
+        printf '  %s✗%s  Could not find opalshell shell directory.\n' "$R" "$N" >&2
+        printf '    Searched: OPALSHELL_DIR, relative, /usr/local/share, /usr/share, ~/.local/share\n' >&2
+        printf '    Try: %sexport OPALSHELL_DIR=/path/to/opalshell/shell%s\n' "$D" "$N" >&2
+        exit 1
+    fi
+
+    # Check if already running
+    _existing=$(find_pids)
+    if [ -n "$_existing" ]; then
+        _pid_list=$(echo "$_existing" | tr '\n' ' ' | sed 's/ $//')
+        printf '  %s!%s  opalshell is already running (PID %s).\n' "$Y" "$N" "$_pid_list"
+        printf '    Use %sopalshell -r%s to restart, or %sopalshell -k%s to kill.\n' "$W" "$N" "$W" "$N"
+        exit 0
+    fi
+
+    # Build verbose flags
+    _qs_verbose=""
+    case "$VERBOSE" in
+        VV) _qs_verbose="-vv" ;;
+        V)  _qs_verbose="-v"  ;;
+    esac
+
+    if [ "$_daemon" = "true" ]; then
+        printf '  %s⟶%s  Launching opalshell in background from %s%s%s\n' "$B" "$N" "$D" "$_shell_dir" "$N"
+        nohup quickshell -p "$_shell_dir" $_qs_verbose >/dev/null 2>&1 &
+        _new_pid=$!
+        sleep 0.5
+        _running_pids=$(find_pids)
+        if [ -n "$_running_pids" ]; then
+            _pid_list=$(echo "$_running_pids" | tr '\n' ' ' | sed 's/ $//')
+            printf '  %s✓%s  opalshell started (PID %s)\n' "$G" "$N" "$_pid_list"
+        else
+            printf '  %s✗%s  Failed to start in background. Run %sopalshell%s to inspect logs.\n' "$R" "$N" "$W" "$N" >&2
+            exit 1
+        fi
+    else
+        # Foreground mode (default) — exec directly so logs stream to terminal and Ctrl+C exits cleanly
+        printf '  %s⟶%s  Launching opalshell from %s%s%s (Ctrl+C to quit)\n' "$B" "$N" "$D" "$_shell_dir" "$N"
+        exec quickshell -p "$_shell_dir" $_qs_verbose
+    fi
+}
+
+# ─── Log ──────────────────────────────────────────────────────────────────────
+do_log() {
+    _shell_dir="$(find_shell_dir)"
+    if [ -z "$_shell_dir" ]; then
+        printf '  %s✗%s  Could not find shell directory.\n' "$R" "$N" >&2
+        exit 1
+    fi
+
+    if command -v qs >/dev/null 2>&1; then
+        exec qs log -p "$_shell_dir" -n -f
+    else
+        printf '  %s✗%s  qs command not found. Install quickshell.\n' "$R" "$N" >&2
+        exit 1
+    fi
+}
+
+# ─── Dependency Checker ──────────────────────────────────────────────────────
+_ok() { printf '  %s[✓]%s  %-24s %s\n' "$G" "$N" "$1" "$2"; }
+_fail() { printf '  %s[✗]%s  %-24s %s\n' "$R" "$N" "$1" "$2"; }
+_opt() {
+    if command -v "$1" >/dev/null 2>&1; then
+        printf '  %s[✓]%s  %-24s %s\n' "$G" "$N" "$1" "$2";
+    else
+        printf '  %s[?]%s  %-24s %s %s(optional)%s\n' "$Y" "$N" "$1" "$2" "$D" "$N";
+    fi
+}
+_font() {
+    if fc-list 2>/dev/null | grep -qi "$1"; then
+        printf '  %s[✓]%s  %-24s %s\n' "$G" "$N" "$1" "$2";
+    else
+        printf '  %s[?]%s  %-24s %s %s(recommended)%s\n' "$Y" "$N" "$1" "$2" "$D" "$N";
+    fi
+}
+
+check_deps() {
+    printf '\n  %sopalshell %s — Dependency Check%s\n' "$W" "$VERSION" "$N"
+    printf '  ──────────────────────────────────────────────\n\n'
+
+    _missing=0
+
+    printf '  %s▸ Core Runtime%s\n' "$C" "$N"
+    for _dep in \
+        "quickshell:Shell framework (>= 0.3.1)" \
+        "nmcli:NetworkManager CLI" \
+        "bluetoothctl:Bluetooth control (bluez)" \
+        "wpctl:Wireplumber / PipeWire" \
+        "busctl:D-Bus control (systemd)" \
+        "brightnessctl:Backlight control"; do
+        _cmd="${_dep%%:*}"
+        _desc="${_dep#*:}"
+        if command -v "$_cmd" >/dev/null 2>&1; then
+            _ok "$_cmd" "$_desc"
+        else
+            _fail "$_cmd" "$_desc"
+            _missing=$((_missing + 1))
+        fi
+    done
+
+    printf '\n  %s▸ Desktop Integration%s\n' "$C" "$N"
+    for _dep in \
+        "kitty:Terminal emulator (for btop)" \
+        "btop:System monitor"; do
+        _cmd="${_dep%%:*}"
+        _desc="${_dep#*:}"
+        if command -v "$_cmd" >/dev/null 2>&1; then
+            _ok "$_cmd" "$_desc"
+        else
+            _fail "$_cmd" "$_desc"
+            _missing=$((_missing + 1))
+        fi
+    done
+
+    # Notification: dunstify OR notify-send
+    if command -v dunstify >/dev/null 2>&1; then
+        _ok "dunstify" "Notification daemon (dunst)"
+    elif command -v notify-send >/dev/null 2>&1; then
+        _ok "notify-send" "Notification fallback (libnotify)"
+    else
+        _fail "dunstify/notify-send" "Notification system"
+        _missing=$((_missing + 1))
+    fi
+
+    printf '\n  %s▸ Optional Tools%s\n' "$C" "$N"
+    _opt "hyprpicker"        "Color picker"
+    _opt "wl-copy"           "Clipboard (wl-clipboard)"
+    _opt "fuzzel"            "App launcher"
+    _opt "rofi"              "App launcher (alternative)"
+    _opt "wofi"              "App launcher (alternative)"
+    _opt "powerprofilesctl"  "Power profiles daemon"
+    _opt "convert"           "ImageMagick (color picker icons)"
+    _opt "wl-gammarelay-rs"  "Night light control"
+
+    printf '\n  %s▸ Fonts%s\n' "$C" "$N"
+    _font "JetBrainsMono Nerd" "Primary bar font"
+    _font "Rubik"              "Secondary text font"
+
+    printf '\n  ──────────────────────────────────────────────\n'
+    if [ "$_missing" -gt 0 ]; then
+        printf '  %s%d required dependency(ies) missing.%s\n' "$R" "$_missing" "$N"
+        printf '  %sArch: sudo pacman -S --needed quickshell networkmanager bluez bluez-utils wireplumber brightnessctl kitty btop libnotify dbus%s\n' "$D" "$N"
+    else
+        printf '  %s✓  All required dependencies found!%s\n' "$G" "$N"
+    fi
+    printf '\n'
+}
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Main — Parse Arguments
+# ═══════════════════════════════════════════════════════════════════════════════
+_action="start"
+_daemon="false"
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -h|--help)       show_help;    exit 0 ;;
+        -v|--version)    show_version; exit 0 ;;
+        -s|--status)     show_status;  exit 0 ;;
+        -c|--config)     show_config;  exit 0 ;;
+        -l|--log)        do_log;       exit 0 ;;
+        -d|--daemon)     _daemon="true"       ;;
+        -k|--kill)       _action="kill"       ;;
+        -r|--restart)    _action="restart"    ;;
+        -VV)             VERBOSE="VV"         ;;
+        -V|--verbose)    VERBOSE="V"          ;;
+        --check-deps)    check_deps;   exit 0 ;;
+        *)
+            printf '%s: unknown option: %s\n' "$APP_NAME" "$1" >&2
+            printf 'Try: %s --help\n' "$APP_NAME" >&2
+            exit 1
+            ;;
+    esac
+    shift
+done
+
+case "$_action" in
+    kill)
+        do_kill
+        ;;
+    restart)
+        do_kill 2>/dev/null
+        sleep 0.5
+        do_start "$_daemon"
+        ;;
+    start)
+        do_start "$_daemon"
+        ;;
+esac

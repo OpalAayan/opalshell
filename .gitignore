@@ -1,0 +1,21 @@
+# Compiled binaries (build output in shell/ for dev convenience)
+shell/sysbridge
+shell/scripts/bt_status
+shell/scripts/wifi_status
+shell/scripts/eth_status
+
+# Object files
+*.o
+
+# Logs
+*.log
+*.qslog
+
+# Editor & OS artifacts
+*~
+*.swp
+*.swo
+*.bak
+.DS_Store
+.vscode/
+.idea/
