@@ -3,12 +3,42 @@ import QtQuick.Layouts
 import Quickshell.Hyprland
 import Quickshell.Io
 
+/* =============================================================================
+ * WorkspaceBar.qml — Hyprland workspaces, with urgency ("this window wants
+ * attention") support.
+ *
+ * HOW URGENCY WORKS HERE
+ * Hyprland emits `urgent>>WINDOWADDRESS` on its event socket when a client
+ * asks for attention (terminal bell, xdg-activation request, some XWayland
+ * apps at startup). Quickshell already listens on that socket, resolves the
+ * address to a window, and exposes the result as HyprlandWorkspace.urgent.
+ *
+ * So we never open the Hyprland request socket ourselves — that socket is
+ * handled synchronously by the compositor and an unclosed connection can
+ * freeze it. Nothing in this file can do that: no sockets, no polling, no
+ * extra processes. Just a property binding.
+ *
+ * Quickshell clears `urgent` on its own once the workspace is focused.
+ * ============================================================================= */
+
 Item {
     id: wsBar
     implicitWidth: wsRow.implicitWidth + 8
     implicitHeight: 28
 
     property string monitorName: ""
+
+    // ==========================================
+    // TWEAK URGENCY LOOK/FEEL HERE:
+    property color urgentColor: "#f38ba8"   // Catppuccin Red
+    property bool  urgentPulse: true        // false = steady ring, no blinking
+    property int   urgentPulseMs: 600       // one fade in / fade out leg
+    property int   urgentStartupGraceMs: 3000 // ignore urgency for N ms after
+                                              // launch, so autostarted apps
+                                              // don't light up the bar at login.
+                                              // Set to 0 to disable.
+    // ==========================================
+
     property var allWorkspaces: Hyprland.workspaces.values
     property int activeId: Hyprland.focusedMonitor?.activeWorkspace?.id ?? 1
 
@@ -22,12 +52,12 @@ Item {
 
     property var activeWorkspaces: {
         var set = {};
-        
+
         // 1. Add persistent workspaces for this monitor
         for (var i = 0; i < persistentWorkspaces.length; ++i) {
             set[persistentWorkspaces[i]] = true;
         }
-        
+
         // 2. Add existing ones on THIS monitor ONLY
         for (var i = 0; i < allWorkspaces.length; ++i) {
             var w = allWorkspaces[i];
@@ -35,11 +65,42 @@ Item {
                 set[w.id] = true;
             }
         }
-        
+
         var arr = Object.keys(set).map(function(k) { return parseInt(k); });
         arr.sort(function(a, b) { return a - b; });
         return arr;
     }
+
+    /* — Startup grace period —
+     * `armed` gates urgency. Anything that goes urgent before we arm is
+     * ignored until it changes again, so a noisy login stays quiet. */
+    property bool armed: urgentStartupGraceMs <= 0
+
+    Timer {
+        interval: wsBar.urgentStartupGraceMs
+        running: !wsBar.armed
+        repeat: false
+        onTriggered: wsBar.armed = true
+    }
+
+    /* — One-time sanity check —
+     * HyprlandWorkspace.urgent needs Quickshell >= 0.3.1. On an older build the
+     * property is simply undefined, which would silently disable urgency
+     * instead of erroring — so say so once, loudly, in the logs. */
+    property bool urgentApiChecked: false
+
+    function checkUrgentApi() {
+        if (urgentApiChecked || allWorkspaces.length === 0)
+            return;
+        urgentApiChecked = true;
+        if (typeof allWorkspaces[0].urgent === "undefined")
+            console.warn("WorkspaceBar: this Quickshell build has no "
+                       + "HyprlandWorkspace.urgent — urgent workspaces will "
+                       + "never highlight. Update Quickshell to 0.3.1+.");
+    }
+
+    Component.onCompleted: checkUrgentApi()
+    onAllWorkspacesChanged: checkUrgentApi()
 
     RowLayout {
         id: wsRow
@@ -53,9 +114,40 @@ Item {
                 id: wsBtn
                 property int wsId: modelData
                 property bool isActive: wsBar.activeId === wsId
-                property var wsObj: Hyprland.workspaces.values.find(w => w.id === wsId)
-                property bool hasWindows: wsObj !== undefined && wsObj !== null && wsObj.windows > 0
-                property bool isUrgent: (wsObj !== undefined && wsObj !== null && typeof wsObj.hasUrgent !== "undefined") ? wsObj.hasUrgent : false
+
+                // The live HyprlandWorkspace object, or null for a persistent
+                // workspace that doesn't exist in Hyprland right now.
+                readonly property var wsObj: {
+                    var list = wsBar.allWorkspaces;
+                    for (var i = 0; i < list.length; ++i) {
+                        if (list[i].id === wsBtn.wsId)
+                            return list[i];
+                    }
+                    return null;
+                }
+
+                // Live window count. `toplevels` updates on open/close/move
+                // events; lastIpcObject is the stale-but-better-than-nothing
+                // fallback.
+                readonly property int windowCount: {
+                    if (!wsObj) return 0;
+                    if (wsObj.toplevels) return wsObj.toplevels.values.length;
+                    var ipc = wsObj.lastIpcObject;
+                    return (ipc && ipc.windows) ? ipc.windows : 0;
+                }
+                readonly property bool hasWindows: windowCount > 0
+
+                // Raw urgency straight from Quickshell. `=== true` keeps this
+                // false (instead of undefined) on builds without the property.
+                readonly property bool wantsAttention: wsObj ? wsObj.urgent === true : false
+
+                // Latched copy of the above, so the grace period can swallow
+                // urgency raised before we armed.
+                property bool urgent: false
+
+                onWantsAttentionChanged: urgent = wantsAttention && wsBar.armed && !isActive
+                onIsActiveChanged: if (isActive) urgent = false     // visited it
+                onWindowCountChanged: if (windowCount === 0) urgent = false // it left
 
                 // ==========================================
                 // TWEAK WORKSPACE CIRCLE SHAPE/SIZE HERE:
@@ -67,17 +159,20 @@ Item {
                 radius: 11 // Half of 22 = perfect circle!
                 // ==========================================
 
-                // Elegant highlight for active workspace
-                color: isActive 
+                // Elegant highlight for active workspace, red wash when urgent
+                color: isActive
                        ? Qt.rgba(203/255, 166/255, 247/255, 1.0) // Mauve solid
-                       : (wsMouseArea.containsMouse ? Qt.rgba(255/255, 255/255, 255/255, 0.08) : "transparent")
+                       : urgent
+                         ? Qt.rgba(wsBar.urgentColor.r, wsBar.urgentColor.g,
+                                   wsBar.urgentColor.b, 0.20)
+                         : (wsMouseArea.containsMouse ? Qt.rgba(255/255, 255/255, 255/255, 0.08) : "transparent")
 
                 Behavior on color { ColorAnimation { duration: 150 } }
                 Behavior on Layout.preferredWidth { NumberAnimation { duration: 200; easing.type: Easing.OutExpo } }
 
                 Text {
                     anchors.centerIn: parent
-                    
+
                     // ==========================================
                     // TWEAK THESE VALUES TO PERFECTLY CENTER IT:
                     // Positive values move text right/down
@@ -85,17 +180,19 @@ Item {
                     anchors.horizontalCenterOffset: -0.5
                     anchors.verticalCenterOffset: 1
                     // ==========================================
-                    
+
                     horizontalAlignment: Text.AlignHCenter
                     verticalAlignment: Text.AlignVCenter
                     text: wsBtn.wsId
                     font.family: "JetBrainsMono Nerd Font"
                     font.pixelSize: 14
                     font.bold: true
-                    // Text is dark when active, light when inactive
-                    color: wsBtn.isActive 
-                           ? "#11111b" 
-                           : (wsBtn.hasWindows ? "#cdd6f4" : "#6c7086")
+                    // Dark when active, red when urgent, light when it has windows
+                    color: wsBtn.isActive
+                           ? "#11111b"
+                           : wsBtn.urgent
+                             ? wsBar.urgentColor
+                             : (wsBtn.hasWindows ? "#cdd6f4" : "#6c7086")
                     Behavior on color { ColorAnimation { duration: 150 } }
                 }
 
@@ -108,7 +205,7 @@ Item {
                     anchors.bottom: parent.bottom
                     anchors.bottomMargin: -2
                     anchors.horizontalCenter: parent.horizontalCenter
-                    visible: !wsBtn.isActive && wsBtn.hasWindows && !wsBtn.isUrgent
+                    visible: !wsBtn.isActive && wsBtn.hasWindows && !wsBtn.urgent
                 }
 
                 // Urgent Indicator: Bottom Red Bar (inset 0 -3px #f38ba8)
@@ -120,27 +217,48 @@ Item {
                     anchors.rightMargin: 6
                     height: 3
                     radius: 2
-                    color: "#f38ba8"
-                    visible: wsBtn.isUrgent
+                    color: wsBar.urgentColor
+                    visible: wsBtn.urgent
                 }
 
-                // Urgent Indicator: Pulsing Outer Glow
+                // Urgent Indicator: Pulsing Outer Glow.
+                // The animation drives `pulse`, never `opacity` directly — an
+                // animation that writes to a property destroys that property's
+                // binding for good, and we want opacity to stay bound.
                 Rectangle {
+                    id: urgentRing
+                    property real pulse: 0
+
                     anchors.centerIn: parent
                     width: parent.width + 4
                     height: parent.height + 4
                     radius: wsBtn.radius + 2
                     color: "transparent"
-                    border.color: "#f38ba8"
+                    border.color: wsBar.urgentColor
                     border.width: 2
-                    opacity: 0
-                    visible: wsBtn.isUrgent
 
-                    SequentialAnimation on opacity {
+                    opacity: wsBtn.urgent ? (wsBar.urgentPulse ? pulse : 0.65) : 0
+                    visible: opacity > 0.001   // nothing to composite when idle
+
+                    SequentialAnimation {
+                        // Stopped entirely when nothing is urgent, so an idle
+                        // bar costs zero frames.
+                        running: wsBtn.urgent && wsBar.urgentPulse
                         loops: Animation.Infinite
-                        running: wsBtn.isUrgent
-                        NumberAnimation { from: 0; to: 0.6; duration: 600; easing.type: Easing.InOutSine }
-                        NumberAnimation { from: 0.6; to: 0; duration: 600; easing.type: Easing.InOutSine }
+                        onRunningChanged: if (!running) urgentRing.pulse = 0
+
+                        NumberAnimation {
+                            target: urgentRing; property: "pulse"
+                            from: 0; to: 0.65
+                            duration: wsBar.urgentPulseMs
+                            easing.type: Easing.InOutSine
+                        }
+                        NumberAnimation {
+                            target: urgentRing; property: "pulse"
+                            to: 0
+                            duration: wsBar.urgentPulseMs
+                            easing.type: Easing.InOutSine
+                        }
                     }
                 }
 
@@ -163,3 +281,4 @@ Item {
         }
     }
 }
+
